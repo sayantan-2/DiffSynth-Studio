@@ -1,6 +1,7 @@
 import torch, os, argparse, accelerate, copy
 from diffsynth.core import UnifiedDataset
 from diffsynth.pipelines.z_image import ZImagePipeline, ModelConfig
+from diffsynth.models.z_image_dit import ZImageDiT
 from diffsynth.diffusion import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -21,6 +22,8 @@ class ZImageTrainingModule(DiffusionTrainingModule):
         template_model_id_or_path=None,
         resume_from_checkpoint=None, remove_prefix_in_ckpt=None,
         enable_lora_hot_loading=False,
+        force_omni_from_base=False,
+        disable_siglip=False,
         device="cpu",
         task="sft",
         enable_npu_patch=True,
@@ -30,6 +33,10 @@ class ZImageTrainingModule(DiffusionTrainingModule):
         model_configs = self.parse_model_configs(model_paths, model_id_with_origin_paths, fp8_models=fp8_models, offload_models=offload_models, device=device)
         tokenizer_config = ModelConfig(model_id="Tongyi-MAI/Z-Image-Turbo", origin_file_pattern="tokenizer/") if tokenizer_path is None else ModelConfig(tokenizer_path)
         self.pipe = ZImagePipeline.from_pretrained(torch_dtype=torch.bfloat16, device=device, model_configs=model_configs, tokenizer_config=tokenizer_config, enable_npu_patch=enable_npu_patch)
+        if force_omni_from_base:
+            self.force_omni_from_base()
+        if disable_siglip:
+            self.disable_siglip()
         self.pipe = self.load_training_template_model(self.pipe, template_model_id_or_path, use_gradient_checkpointing, use_gradient_checkpointing_offload)
         self.pipe = self.split_pipeline_units(task, self.pipe, trainable_models, lora_base_model)
         self.resume_from_checkpoint(resume_from_checkpoint, remove_prefix_in_ckpt)
@@ -42,6 +49,8 @@ class ZImageTrainingModule(DiffusionTrainingModule):
             preset_lora_path, preset_lora_model,
             task=task,
         )
+        if force_omni_from_base:
+            self.freeze_siglip_parameters()
         
         # Other configs
         self.use_gradient_checkpointing = use_gradient_checkpointing
@@ -64,6 +73,66 @@ class ZImageTrainingModule(DiffusionTrainingModule):
             self.task_to_loss["trajectory_imitation"] = self.loss_fn
             self.pipe_teacher = copy.deepcopy(self.pipe)
             self.pipe_teacher.requires_grad_(False)
+
+    def force_omni_from_base(self):
+        if self.pipe.dit is None:
+            raise ValueError("`--force_omni_from_base` requires a loaded Z-Image Base/Turbo DiT.")
+        base_dit = self.pipe.dit
+        base_state_dict = base_dit.state_dict()
+        omni_dit = ZImageDiT(siglip_feat_dim=1152).to(device="cpu", dtype=self.pipe.torch_dtype)
+        missing_keys, unexpected_keys = omni_dit.load_state_dict(base_state_dict, strict=False)
+        self.pipe.dit = omni_dit
+        del base_dit
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self.print_omni_load_statistics(base_state_dict, self.pipe.dit.state_dict(), missing_keys, unexpected_keys)
+
+    def print_omni_load_statistics(self, base_state_dict, omni_state_dict, missing_keys, unexpected_keys):
+        missing_keys = list(missing_keys)
+        unexpected_keys = list(unexpected_keys)
+        loaded_keys = sorted([key for key in base_state_dict.keys() if key in omni_state_dict and key not in unexpected_keys])
+        loaded_params = sum(omni_state_dict[key].numel() for key in loaded_keys)
+        missing_params = sum(omni_state_dict[key].numel() for key in missing_keys)
+        unexpected_params = sum(base_state_dict[key].numel() for key in unexpected_keys)
+        total_params = sum(param.numel() for param in omni_state_dict.values())
+        loaded_percent = loaded_params / total_params * 100 if total_params > 0 else 0
+        missing_percent = missing_params / total_params * 100 if total_params > 0 else 0
+        print("Forced Omni ZImageDiT from Base checkpoint with strict=False.")
+        print(f"Loaded parameters: {loaded_params:,} ({loaded_percent:.4f}%)")
+        print(f"Missing parameters: {missing_params:,} ({missing_percent:.4f}%)")
+        print(f"Unexpected parameters: {unexpected_params:,}")
+        print(f"Loaded keys: {len(loaded_keys)}")
+        print(f"Missing keys: {len(missing_keys)}")
+        print(f"Unexpected keys: {len(unexpected_keys)}")
+        if missing_keys:
+            print("Missing key list:")
+            for key in missing_keys:
+                print(f"  {key}")
+        if unexpected_keys:
+            print("Unexpected key list:")
+            for key in unexpected_keys:
+                print(f"  {key}")
+
+    def disable_siglip(self):
+        self.pipe.disable_siglip = True
+        self.pipe.image_encoder = None
+        self.pipe.units = [
+            unit for unit in self.pipe.units
+            if unit.__class__.__name__ != "ZImageUnit_EditImageEmbedderSiglip"
+        ]
+
+    def freeze_siglip_parameters(self):
+        if self.pipe.dit is None:
+            return
+        frozen = []
+        for name, param in self.pipe.dit.named_parameters():
+            if name.startswith("siglip_"):
+                param.requires_grad_(False)
+                frozen.append(name)
+        if frozen:
+            print(f"Frozen {len(frozen)} SigLIP parameters:")
+            for name in frozen:
+                print(f"  dit.{name}")
         
     def get_pipeline_inputs(self, data):
         inputs_posi = {"prompt": data["prompt"]}
@@ -102,6 +171,8 @@ def z_image_parser():
     parser = add_image_size_config(parser)
     parser.add_argument("--tokenizer_path", type=str, default=None, help="Path to tokenizer.")
     parser.add_argument("--enable_npu_patch", default=False, action="store_true", help="Whether to use npu fused operator patch to improve performance in NPU.")
+    parser.add_argument("--force_omni_from_base", default=False, action="store_true", help="Instantiate Omni ZImageDiT and load the loaded Base/Turbo DiT weights with strict=False.")
+    parser.add_argument("--disable_siglip", default=False, action="store_true", help="Disable SigLIP image conditioning and pass image_embeds=None to the Omni DiT.")
     return parser
 
 
@@ -146,6 +217,8 @@ if __name__ == "__main__":
         resume_from_checkpoint=args.resume_from_checkpoint,
         remove_prefix_in_ckpt=args.remove_prefix_in_ckpt,
         enable_lora_hot_loading=args.enable_lora_hot_loading,
+        force_omni_from_base=args.force_omni_from_base,
+        disable_siglip=args.disable_siglip,
         task=args.task,
         device="cpu" if args.enable_model_cpu_offload else accelerator.device,
         enable_npu_patch=args.enable_npu_patch

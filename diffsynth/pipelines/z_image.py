@@ -377,6 +377,8 @@ class ZImageUnit_EditImageEmbedderSiglip(PipelineUnit):
         )
 
     def process(self, pipe: ZImagePipeline, edit_image):
+        if getattr(pipe, "disable_siglip", False):
+            return {"image_embeds": None}
         if edit_image is None:
             return {}
         pipe.load_models_to_device(self.onload_model_names)
