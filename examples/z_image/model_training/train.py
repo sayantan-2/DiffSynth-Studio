@@ -79,7 +79,7 @@ class ZImageTrainingModule(DiffusionTrainingModule):
             raise ValueError("`--force_omni_from_base` requires a loaded Z-Image Base/Turbo DiT.")
         base_dit = self.pipe.dit
         base_state_dict = base_dit.state_dict()
-        omni_dit = ZImageDiT(siglip_feat_dim=1152).to(device="cpu", dtype=self.pipe.torch_dtype)
+        omni_dit = ZImageDiT(force_omni_mode=True).to(device="cpu", dtype=self.pipe.torch_dtype)
         missing_keys, unexpected_keys = omni_dit.load_state_dict(base_state_dict, strict=False)
         self.pipe.dit = omni_dit
         del base_dit
@@ -171,7 +171,7 @@ def z_image_parser():
     parser = add_image_size_config(parser)
     parser.add_argument("--tokenizer_path", type=str, default=None, help="Path to tokenizer.")
     parser.add_argument("--enable_npu_patch", default=False, action="store_true", help="Whether to use npu fused operator patch to improve performance in NPU.")
-    parser.add_argument("--force_omni_from_base", default=False, action="store_true", help="Instantiate Omni ZImageDiT and load the loaded Base/Turbo DiT weights with strict=False.")
+    parser.add_argument("--force_omni_from_base", default=False, action="store_true", help="Force Omni latent-sequence mode on ZImageDiT and load the loaded Base/Turbo DiT weights with strict=False.")
     parser.add_argument("--disable_siglip", default=False, action="store_true", help="Disable SigLIP image conditioning and pass image_embeds=None to the Omni DiT.")
     return parser
 

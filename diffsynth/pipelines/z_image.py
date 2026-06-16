@@ -24,6 +24,10 @@ from ..models.dinov3_image_encoder import DINOv3ImageEncoder
 from ..models.z_image_image2lora import ZImageImage2LoRAModel
 
 
+def is_omni_dit(dit: ZImageDiT):
+    return dit is not None and (getattr(dit, "force_omni_mode", False) or dit.siglip_embedder is not None)
+
+
 class ZImagePipeline(BasePipeline):
 
     def __init__(self, device=get_device_type(), torch_dtype=torch.bfloat16):
@@ -305,7 +309,7 @@ class ZImageUnit_PromptEmbedder(PipelineUnit):
 
     def process(self, pipe: ZImagePipeline, prompt, edit_image):
         pipe.load_models_to_device(self.onload_model_names)
-        if hasattr(pipe, "dit") and pipe.dit is not None and pipe.dit.siglip_embedder is not None:
+        if hasattr(pipe, "dit") and is_omni_dit(pipe.dit):
             # Z-Image-Turbo and Z-Image-Omni-Base use different prompt encoding methods.
             # We determine which encoding method to use based on the model architecture.
             # If you are using two-stage split training,
@@ -466,7 +470,7 @@ def model_fn_z_image(
     # Due to the complex and verbose codebase of Z-Image,
     # we are temporarily using this inelegant structure.
     # We will refactor this part in the future (if time permits).
-    if dit.siglip_embedder is None:
+    if not is_omni_dit(dit):
         return model_fn_z_image_turbo(
             dit,
             controlnet=controlnet,
@@ -480,17 +484,14 @@ def model_fn_z_image(
             **kwargs,
         )
     latents = [rearrange(latents, "B C H W -> C B H W")]
-    if dit.siglip_embedder is not None:
-        if image_latents is not None:
-            image_latents = [rearrange(image_latent, "B C H W -> C B H W") for image_latent in image_latents]
-            latents = [image_latents + latents]
-            image_noise_mask = [[0] * len(image_latents) + [1]]
-        else:
-            latents = [latents]
-            image_noise_mask = [[1]]
-        image_embeds = [image_embeds]
+    if image_latents is not None:
+        image_latents = [rearrange(image_latent, "B C H W -> C B H W") for image_latent in image_latents]
+        latents = [image_latents + latents]
+        image_noise_mask = [[0] * len(image_latents) + [1]]
     else:
-        image_noise_mask = None
+        latents = [latents]
+        image_noise_mask = [[1]]
+    image_embeds = [image_embeds]
     timestep = (1000 - timestep) / 1000
     model_output = dit(
         latents,

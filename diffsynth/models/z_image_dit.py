@@ -346,6 +346,7 @@ class ZImageDiT(nn.Module):
         axes_dims=[32, 48, 48],
         axes_lens=[1024, 512, 512],
         siglip_feat_dim=None,
+        force_omni_mode=False,
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
@@ -358,6 +359,7 @@ class ZImageDiT(nn.Module):
         self.rope_theta = rope_theta
         self.t_scale = t_scale
         self.gradient_checkpointing = False
+        self.force_omni_mode = force_omni_mode
 
         assert len(all_patch_size) == len(all_f_patch_size)
 
