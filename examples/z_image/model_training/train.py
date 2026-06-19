@@ -1,4 +1,4 @@
-import torch, os, argparse, accelerate, copy
+import torch, os, argparse, accelerate, copy, json
 from diffsynth.core import UnifiedDataset
 from diffsynth.pipelines.z_image import ZImagePipeline, ModelConfig
 from diffsynth.diffusion import *
@@ -35,6 +35,10 @@ class ZImageTrainingModule(DiffusionTrainingModule):
         self.resume_from_checkpoint(resume_from_checkpoint, remove_prefix_in_ckpt)
         if enable_lora_hot_loading: self.pipe.dit = self.pipe.enable_lora_hot_loading(self.pipe.dit)
 
+        # Patch RoPE cache: enlarge axis-0 to handle long JSON caption offset
+        self.pipe.dit.rope_embedder.axes_lens[0] = 2048
+        self.pipe.dit.rope_embedder.freqs_cis = None
+
         # Training mode
         self.switch_pipe_to_training_mode(
             self.pipe, trainable_models,
@@ -42,7 +46,7 @@ class ZImageTrainingModule(DiffusionTrainingModule):
             preset_lora_path, preset_lora_model,
             task=task,
         )
-        
+
         # Other configs
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload
@@ -64,9 +68,10 @@ class ZImageTrainingModule(DiffusionTrainingModule):
             self.task_to_loss["trajectory_imitation"] = self.loss_fn
             self.pipe_teacher = copy.deepcopy(self.pipe)
             self.pipe_teacher.requires_grad_(False)
-        
+
     def get_pipeline_inputs(self, data):
-        inputs_posi = {"prompt": data["prompt"]}
+        prompt_str = json.dumps(data["prompt"])
+        inputs_posi = {"prompt": prompt_str}
         inputs_nega = {"negative_prompt": ""}
         inputs_shared = {
             # Assume you are using this pipeline for inference,
@@ -86,7 +91,7 @@ class ZImageTrainingModule(DiffusionTrainingModule):
             inputs_shared["teacher"] = self.pipe_teacher
         inputs_shared = self.parse_extra_inputs(data, self.extra_inputs, inputs_shared)
         return inputs_shared, inputs_posi, inputs_nega
-    
+
     def forward(self, data, inputs=None):
         if inputs is None: inputs = self.get_pipeline_inputs(data)
         inputs = self.transfer_data_to_device(inputs, self.pipe.device, self.pipe.torch_dtype)
