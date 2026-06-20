@@ -122,6 +122,7 @@ if __name__ == "__main__":
         metadata_path=args.dataset_metadata_path,
         repeat=args.dataset_repeat,
         data_file_keys=args.data_file_keys.split(","),
+        max_data_items=args.max_data_items,
         main_data_operator=UnifiedDataset.default_image_operator(
             base_path=args.dataset_base_path,
             max_pixels=args.max_pixels,
