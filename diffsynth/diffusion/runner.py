@@ -3,7 +3,6 @@ from tqdm import tqdm
 from accelerate import Accelerator
 from .training_module import DiffusionTrainingModule
 from .logger import ModelLogger
-from .sampler import TrainingImageSampler
 from diffsynth.core import OffloadTrainingManager
 
 
@@ -31,10 +30,6 @@ def launch_training_task(
     enable_optimizer_cpu_offload: bool = False,
     cpu_offload_split_threshold: int = None,
     customized_optimizer: str = None,
-    sample_steps: int = None,
-    sample_epochs: int = None,
-    sample_prompts_path: str = None,
-    sample_output_path: str = None,
     args = None,
     **kwargs,
 ):
@@ -48,19 +43,6 @@ def launch_training_task(
         enable_optimizer_cpu_offload = args.enable_optimizer_cpu_offload
         cpu_offload_split_threshold = args.cpu_offload_split_threshold
         customized_optimizer = args.customized_optimizer
-        sample_steps = getattr(args, "sample_steps", sample_steps)
-        sample_epochs = getattr(args, "sample_epochs", sample_epochs)
-        sample_prompts_path = getattr(args, "sample_prompts_path", sample_prompts_path)
-        sample_output_path = getattr(args, "sample_output_path", sample_output_path)
-
-    if sample_output_path is None:
-        sample_output_path = os.path.join(model_logger.output_path, "samples")
-    image_sampler = TrainingImageSampler(
-        prompts_path=sample_prompts_path,
-        output_path=sample_output_path,
-        sample_steps=sample_steps,
-        sample_epochs=sample_epochs,
-    )
 
     optimizer_class = get_optimizer_class(customized_optimizer)
     optimizer = optimizer_class(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
@@ -90,10 +72,8 @@ def launch_training_task(
                 scheduler.step()
                 optimizer.zero_grad()
                 model_logger.on_step_end(accelerator, model, save_steps, loss=loss)
-                image_sampler.on_step_end(accelerator, model, model_logger.num_steps)
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
-        image_sampler.on_epoch_end(accelerator, model, epoch_id + 1)
 
     model_logger.on_training_end(accelerator, model, save_steps)
 

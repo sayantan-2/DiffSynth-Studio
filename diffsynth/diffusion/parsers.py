@@ -48,13 +48,6 @@ def add_output_config(parser: argparse.ArgumentParser):
     parser.add_argument("--save_steps", type=int, default=None, help="Number of checkpoint saving invervals. If None, checkpoints will be saved every epoch.")
     return parser
 
-def add_sampling_config(parser: argparse.ArgumentParser):
-    parser.add_argument("--sample_steps", type=int, default=None, help="Number of training step intervals for sampling images.")
-    parser.add_argument("--sample_epochs", type=int, default=None, help="Number of training epoch intervals for sampling images.")
-    parser.add_argument("--sample_prompts_path", type=str, default=None, help="Path to CSV, JSON, or JSONL prompt metadata used for training-time sampling.")
-    parser.add_argument("--sample_output_path", type=str, default=None, help="Output path for training-time samples. Defaults to <output_path>/samples.")
-    return parser
-
 def add_lora_config(parser: argparse.ArgumentParser):
     parser.add_argument("--lora_base_model", type=str, default=None, help="Which model LoRA is added to.")
     parser.add_argument("--lora_target_modules", type=str, default="q,k,v,o,ffn.0,ffn.2", help="Which layers LoRA is added to.")
@@ -94,7 +87,6 @@ def add_general_config(parser: argparse.ArgumentParser):
     parser = add_model_config(parser)
     parser = add_training_config(parser)
     parser = add_output_config(parser)
-    parser = add_sampling_config(parser)
     parser = add_lora_config(parser)
     parser = add_gradient_config(parser)
     parser = add_template_model_config(parser)
