@@ -36,8 +36,9 @@ class ZImageTrainingModule(DiffusionTrainingModule):
         if enable_lora_hot_loading: self.pipe.dit = self.pipe.enable_lora_hot_loading(self.pipe.dit)
 
         # Patch RoPE cache: enlarge axis-0 to handle long JSON caption offset
-        self.pipe.dit.rope_embedder.axes_lens[0] = 2048
-        self.pipe.dit.rope_embedder.freqs_cis = None
+        if self.pipe.dit is not None:
+            self.pipe.dit.rope_embedder.axes_lens[0] = 2048
+            self.pipe.dit.rope_embedder.freqs_cis = None
 
         # Training mode
         self.switch_pipe_to_training_mode(
