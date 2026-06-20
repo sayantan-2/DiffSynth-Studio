@@ -324,6 +324,8 @@ class DiffusionTrainingModule(torch.nn.Module):
         force_remove_params_posi=tuple(),
         force_remove_params_nega=tuple(),
     ):
+        if not hasattr(pipe, "_diffsynth_inference_units"):
+            pipe._diffsynth_inference_units = list(pipe.units)
         models_require_backward = []
         if trainable_models is not None:
             models_require_backward += trainable_models.split(",")
@@ -339,6 +341,7 @@ class DiffusionTrainingModule(torch.nn.Module):
                 pipe.units.append(GeneralUnit_RemoveCache(required_params, force_remove_params_shared, force_remove_params_posi, force_remove_params_nega))
         elif task.endswith(":train"):
             pipe.units, _ = pipe.split_pipeline_units(models_require_backward)
+        pipe._diffsynth_training_units = list(pipe.units)
         return pipe
     
     def parse_extra_inputs(self, data, extra_inputs, inputs_shared):
