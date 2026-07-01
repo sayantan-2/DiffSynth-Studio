@@ -448,6 +448,37 @@ class ZImageDiT(nn.Module):
 
         self.rope_embedder = RopeEmbedder(theta=rope_theta, axes_dims=axes_dims, axes_lens=axes_lens)
 
+    def reset_latent_projection(
+        self,
+        in_channels: int,
+        all_patch_size=(2,),
+        all_f_patch_size=(1,),
+    ):
+        ref_param = next(self.parameters())
+        device, dtype = ref_param.device, ref_param.dtype
+
+        self.in_channels = in_channels
+        self.out_channels = in_channels
+        self.all_patch_size = tuple(all_patch_size)
+        self.all_f_patch_size = tuple(all_f_patch_size)
+
+        all_x_embedder = {}
+        all_final_layer = {}
+        for patch_size, f_patch_size in zip(self.all_patch_size, self.all_f_patch_size):
+            key = f"{patch_size}-{f_patch_size}"
+            all_x_embedder[key] = nn.Linear(
+                f_patch_size * patch_size * patch_size * in_channels,
+                self.dim,
+                bias=True,
+            )
+            all_final_layer[key] = FinalLayer(
+                self.dim,
+                patch_size * patch_size * f_patch_size * self.out_channels,
+            )
+
+        self.all_x_embedder = nn.ModuleDict(all_x_embedder).to(device=device, dtype=dtype)
+        self.all_final_layer = nn.ModuleDict(all_final_layer).to(device=device, dtype=dtype)
+
     def unpatchify(
         self,
         x: List[torch.Tensor],
