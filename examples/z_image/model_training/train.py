@@ -50,7 +50,18 @@ class ZImageTrainingModule(DiffusionTrainingModule):
             preset_lora_path, preset_lora_model,
             task=task,
         )
-        
+        # PEFT's inject_adapter_in_model freezes ALL base params, overriding freeze_except.
+        # Re-enable grad on full-param trainable modules so they get saved too.
+        dit = getattr(self.pipe, "dit", None)
+        if dit is not None and trainable_models:
+            for mod_path in trainable_models.replace("dit.", "").split(","):
+                mod_path = mod_path.strip()
+                if not mod_path:
+                    continue
+                mod = dit.get_submodule(mod_path) if "." in mod_path else getattr(dit, mod_path, None)
+                if mod is not None:
+                    mod.requires_grad_(True)
+
         # Other configs
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload
