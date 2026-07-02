@@ -25,6 +25,7 @@ class ZImageTrainingModule(DiffusionTrainingModule):
         task="sft",
         enable_npu_patch=True,
         use_flux2_vae=False,
+        flux2_vae_latent_format="packed",
     ):
         super().__init__()
         # Load models
@@ -37,6 +38,7 @@ class ZImageTrainingModule(DiffusionTrainingModule):
             tokenizer_config=tokenizer_config,
             enable_npu_patch=enable_npu_patch,
             use_flux2_vae=use_flux2_vae,
+            flux2_vae_latent_format=flux2_vae_latent_format,
         )
         self.pipe = self.load_training_template_model(self.pipe, template_model_id_or_path, use_gradient_checkpointing, use_gradient_checkpointing_offload)
         self.pipe = self.split_pipeline_units(task, self.pipe, trainable_models, lora_base_model)
@@ -121,7 +123,8 @@ def z_image_parser():
     parser = add_image_size_config(parser)
     parser.add_argument("--tokenizer_path", type=str, default=None, help="Path to tokenizer.")
     parser.add_argument("--enable_npu_patch", default=False, action="store_true", help="Whether to use npu fused operator patch to improve performance in NPU.")
-    parser.add_argument("--use_flux2_vae", default=False, action="store_true", help="Use Flux.2 VAE packed 128-channel latents with Z-Image.")
+    parser.add_argument("--use_flux2_vae", default=False, action="store_true", help="Use Flux.2 VAE latents with Z-Image.")
+    parser.add_argument("--flux2_vae_latent_format", type=str, default="packed", choices=("packed", "unpacked"), help="Flux.2 VAE latent format: packed is 128xH/16xW/16; unpacked is 32xH/8xW/8.")
     return parser
 
 
@@ -170,6 +173,7 @@ if __name__ == "__main__":
         device="cpu" if args.enable_model_cpu_offload else accelerator.device,
         enable_npu_patch=args.enable_npu_patch,
         use_flux2_vae=args.use_flux2_vae,
+        flux2_vae_latent_format=args.flux2_vae_latent_format,
     )
     model_logger = ModelLogger(
         args.output_path,

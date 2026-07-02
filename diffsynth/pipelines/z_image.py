@@ -39,6 +39,7 @@ class ZImagePipeline(BasePipeline):
         self.vae_decoder: FluxVAEDecoder = None
         self.vae: Flux2VAE = None
         self.use_flux2_vae = False
+        self.flux2_vae_latent_format = "packed"
         self.latent_channels = 16
         self.latent_height_division_factor = 8
         self.latent_width_division_factor = 8
@@ -72,6 +73,7 @@ class ZImagePipeline(BasePipeline):
         vram_limit: float = None,
         enable_npu_patch: bool = True,
         use_flux2_vae: bool = False,
+        flux2_vae_latent_format: str = "packed",
     ):
         # Initialize pipeline
         pipe = ZImagePipeline(device=device, torch_dtype=torch_dtype)
@@ -81,15 +83,25 @@ class ZImagePipeline(BasePipeline):
         pipe.text_encoder = model_pool.fetch_model("z_image_text_encoder")
         pipe.dit = model_pool.fetch_model("z_image_dit")
         pipe.use_flux2_vae = use_flux2_vae
+        pipe.flux2_vae_latent_format = flux2_vae_latent_format
         if use_flux2_vae:
+            if flux2_vae_latent_format not in ("packed", "unpacked"):
+                raise ValueError("flux2_vae_latent_format must be 'packed' or 'unpacked'.")
             pipe.vae = model_pool.fetch_model("flux2_vae")
             if pipe.vae is None:
                 raise ValueError("use_flux2_vae=True requires a loaded flux2_vae model config.")
-            pipe.latent_channels = 128
-            pipe.latent_height_division_factor = 16
-            pipe.latent_width_division_factor = 16
-            if pipe.dit is not None:
-                pipe.dit.reset_latent_projection(in_channels=128, all_patch_size=(1,), all_f_patch_size=(1,))
+            if flux2_vae_latent_format == "packed":
+                pipe.latent_channels = 128
+                pipe.latent_height_division_factor = 16
+                pipe.latent_width_division_factor = 16
+                if pipe.dit is not None:
+                    pipe.dit.reset_latent_projection(in_channels=128, all_patch_size=(1,), all_f_patch_size=(1,))
+            else:
+                pipe.latent_channels = 32
+                pipe.latent_height_division_factor = 8
+                pipe.latent_width_division_factor = 8
+                if pipe.dit is not None:
+                    pipe.dit.reset_latent_projection(in_channels=32, all_patch_size=(2,), all_f_patch_size=(1,))
         else:
             pipe.vae_encoder = model_pool.fetch_model("flux_vae_encoder")
             pipe.vae_decoder = model_pool.fetch_model("flux_vae_decoder")
@@ -116,11 +128,15 @@ class ZImagePipeline(BasePipeline):
 
     def encode_image_latents(self, image):
         if self.use_flux2_vae:
+            if self.flux2_vae_latent_format == "unpacked":
+                return self.vae._encode(image)[:, :32]
             return self.vae.encode(image)
         return self.vae_encoder(image)
 
     def decode_image_latents(self, latents):
         if self.use_flux2_vae:
+            if self.flux2_vae_latent_format == "unpacked":
+                return self.vae._decode(latents)
             return self.vae.decode(latents)
         return self.vae_decoder(latents)
     
