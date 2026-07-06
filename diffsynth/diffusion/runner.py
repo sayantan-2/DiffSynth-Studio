@@ -76,19 +76,30 @@ def launch_training_task(
 
     initialize_deepspeed_gradient_checkpointing(accelerator)
     for epoch_id in range(num_epochs):
-        for data in tqdm(dataloader):
-            with accelerator.accumulate(model):
-                if dataset.load_from_cache:
-                    loss = model({}, inputs=data)
-                else:
-                    loss = model(data)
-                accelerator.backward(loss)
-                if enable_model_cpu_offload:
-                    offload_manager.after_backward()
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-                model_logger.on_step_end(accelerator, model, save_steps, loss=loss)
+        epoch_loss_sum = 0.0
+        epoch_loss_count = 0
+        with tqdm(dataloader, disable=not accelerator.is_main_process) as progress_bar:
+            for data in progress_bar:
+                with accelerator.accumulate(model):
+                    if dataset.load_from_cache:
+                        loss = model({}, inputs=data)
+                    else:
+                        loss = model(data)
+                    accelerator.backward(loss)
+                    if enable_model_cpu_offload:
+                        offload_manager.after_backward()
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
+                    model_logger.on_step_end(accelerator, model, save_steps, loss=loss)
+                    loss_value = accelerator.gather(loss.detach()).mean().item()
+                    epoch_loss_sum += loss_value
+                    epoch_loss_count += 1
+                    if accelerator.is_main_process:
+                        progress_bar.set_postfix(loss=f"{loss_value:.4f}")
+            if accelerator.is_main_process and epoch_loss_count > 0:
+                progress_bar.set_postfix(loss=f"{epoch_loss_sum / epoch_loss_count:.4f}")
+                progress_bar.refresh()
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
 
