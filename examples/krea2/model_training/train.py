@@ -1,4 +1,4 @@
-import torch, os, argparse, accelerate
+import torch, os, argparse, accelerate, json
 from diffsynth.core import UnifiedDataset
 from diffsynth.pipelines.krea2 import Krea2Pipeline, ModelConfig
 from diffsynth.diffusion import *
@@ -53,7 +53,8 @@ class Krea2ImageTrainingModule(DiffusionTrainingModule):
         }
 
     def get_pipeline_inputs(self, data):
-        inputs_posi = {"prompt": data["prompt"]}
+        prompt_str = json.dumps(data["prompt"])
+        inputs_posi = {"prompt": prompt_str}
         inputs_nega = {"negative_prompt": ""}
         inputs_shared = {
             "input_image": data["image"],
@@ -98,6 +99,7 @@ if __name__ == "__main__":
         metadata_path=args.dataset_metadata_path,
         repeat=args.dataset_repeat,
         data_file_keys=args.data_file_keys.split(","),
+        max_data_items=args.max_data_items,
         main_data_operator=UnifiedDataset.default_image_operator(
             base_path=args.dataset_base_path,
             max_pixels=args.max_pixels,

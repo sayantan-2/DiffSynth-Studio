@@ -55,7 +55,7 @@ class Krea2Pipeline(BasePipeline):
         if tokenizer_config is not None:
             tokenizer_config.download_if_necessary()
             from transformers import AutoTokenizer
-            pipe.tokenizer = AutoTokenizer.from_pretrained(tokenizer_config.path, max_length=512)
+            pipe.tokenizer = AutoTokenizer.from_pretrained(tokenizer_config.path, max_length=2048)
         pipe.vram_management_enabled = pipe.check_vram_management_state()
         return pipe
 
@@ -142,10 +142,10 @@ class Krea2Unit_PromptEmbedder(PipelineUnit):
 
     def encode_prompt(self, pipe: Krea2Pipeline, prompt):
         select_layers = (2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35)
-        max_length = 512
-        prefix_idx = 34
+        max_length = 2048
+        prefix_idx = 66
         suffix_start_idx = 5
-        prompt_template_prefix = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n"
+        prompt_template_prefix = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background. Bounding boxes use [y_min, x_min, y_max, x_max] format, values 0-1000, top-left origin:<|im_end|>\n<|im_start|>user\n"
         prompt_template_suffix = "<|im_end|>\n<|im_start|>assistant\n"
 
         prompt = [prompt_template_prefix + p for p in prompt]
