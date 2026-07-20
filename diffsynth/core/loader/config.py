@@ -5,6 +5,11 @@ from modelscope import snapshot_download
 from huggingface_hub import snapshot_download as hf_snapshot_download
 from typing import Optional
 
+# Map ModelScope model IDs to their Hugging Face mirrors
+HF_MODEL_ID_MAP = {
+    "DiffSynth-Studio/ImageMetrics": "achiru/DiffSynth-Studio-ImageMetrics",
+}
+
 
 @dataclass
 class ModelConfig:
@@ -71,8 +76,9 @@ class ModelConfig:
                 local_files_only=False
             )
         elif download_source.lower() == "huggingface":
+            hf_model_id = HF_MODEL_ID_MAP.get(self.model_id, self.model_id)
             hf_snapshot_download(
-                self.model_id,
+                hf_model_id,
                 local_dir=os.path.join(self.local_model_path, self.model_id),
                 allow_patterns=origin_file_pattern,
                 ignore_patterns=downloaded_files,

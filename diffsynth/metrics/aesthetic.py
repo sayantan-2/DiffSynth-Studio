@@ -1,3 +1,4 @@
+import os
 import torch
 from ..core import ModelConfig
 from ..core.device.npu_compatible_device import get_device_type
@@ -11,15 +12,27 @@ class AestheticMetric(Metric):
         self.model = model
 
     @classmethod
+    def _get_model_id(cls):
+        download_source = os.environ.get("DIFFSYNTH_DOWNLOAD_SOURCE", "modelscope")
+        if download_source.lower() == "huggingface":
+            return "achiru/DiffSynth-Studio-ImageMetrics"
+        return "DiffSynth-Studio/ImageMetrics"
+
+    @classmethod
     def from_pretrained(
         cls,
-        model_config: ModelConfig = ModelConfig(model_id="DiffSynth-Studio/ImageMetrics", origin_file_pattern="Aesthetic/model.safetensors"),
-        processor_config: ModelConfig = ModelConfig(model_id="DiffSynth-Studio/ImageMetrics", origin_file_pattern="Aesthetic/"),
+        model_config: ModelConfig = None,
+        processor_config: ModelConfig = None,
         torch_dtype: torch.dtype = None,
         device: torch.device = get_device_type(),
         processor_kwargs: dict = None,
         vram_limit: float = None,
     ):
+        model_id = cls._get_model_id()
+        if model_config is None:
+            model_config = ModelConfig(model_id=model_id, origin_file_pattern="Aesthetic/model.safetensors")
+        if processor_config is None:
+            processor_config = ModelConfig(model_id=model_id, origin_file_pattern="Aesthetic/")
 
         processor_kwargs = processor_kwargs or {}
         model_pool = cls.download_and_load_models([model_config], torch_dtype=torch_dtype, device=device, vram_limit=vram_limit)

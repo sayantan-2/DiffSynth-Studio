@@ -77,14 +77,9 @@ Text-conditioned rewards need the prompt passed to the adapter as well; the gene
 
 ## Extending to another image model
 
-The objective is not tied to Stable Diffusion. An adapter needs a pipeline with:
+The objective is not tied to Stable Diffusion. Supply a `DRaFTPipelineAdapter` that configures the scheduler, selects the LV resampling point, and decodes latents. The target pipeline also needs model/CFG hooks (`model_fn`, `cfg_guided_model_fn`, pipeline `step`) plus initial latent and conditioning dictionaries.
 
-1. differentiable sampler scheduling (`set_timesteps`, `add_noise`, `step`);
-2. model/CFG hooks (`model_fn`, `cfg_guided_model_fn`, pipeline `step`);
-3. initial latent and conditioning dictionaries;
-4. differentiable VAE decode and scaling factor.
-
-Make a new model-specific example runner to prepare the target pipeline's prompt, noise, and conditioning inputs, then feed those dictionaries to `DRaFTLoss`. Video/audio models need a corresponding decode and reward adapter, so they are intentionally outside this image implementation's contract.
+Make a small adapter and model-specific example runner to prepare the target pipeline's prompt, noise, and conditioning inputs, then pass the adapter to `DRaFTLoss`. DRaFT-K/LV's sampling and reward-gradient algorithm remains shared. Video/audio models need a corresponding decode and reward adapter, so they are intentionally outside this image implementation's contract.
 
 ## Run
 
@@ -93,3 +88,17 @@ bash examples/stable_diffusion/model_training/lora/stable-diffusion-v1-5-draft-a
 ```
 
 `PROMPTS_CSV=/path/to/prompts.csv bash ...` supplies your own prompt set. Model components and the aesthetic reward download on first use. Start with LoRA, gradient checkpointing, K=1, LV=1 or 2, then validate on held-out prompts with independent metrics and visual review: reward optimization can overfit reward-model artifacts or reduce diversity.
+## Krea-2 Raw adapter
+
+Krea-2 Raw uses `Krea2DRaFTAdapter` in its prompt-only runner at `examples/krea2/model_training/train_draft.py`. It follows the same DRaFT-K/LV method and reward contract, but adapts the generic objective to Krea-2's flow-matching scheduler and Qwen Image VAE.
+
+- The default sampler configuration is 28 steps with CFG 3.5, matching Krea-2 Raw inference defaults.
+- Krea's `--draft_low_variance_timestep` is a sampler-trajectory index (default 12), not a DDIM training timestep; it is clamped to the valid index range.
+- Its Qwen VAE performs latent normalization internally, so there is no Stable Diffusion-style external VAE scaling factor.
+- Krea-2 Turbo is intentionally omitted because the project's existing examples do not recommend LoRA fine-tuning it.
+
+Run the Krea-2 Raw smoke test with:
+
+```bash
+bash examples/krea2/model_training/lora/Krea-2-Raw-DRaFT-Aesthetic.sh
+```
