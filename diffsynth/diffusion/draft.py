@@ -144,6 +144,9 @@ class DifferentiableAestheticReward(torch.nn.Module):
         if isinstance(size, Number):
             value = int(size)
             return value, value
+        height, width = getattr(size, "height", None), getattr(size, "width", None)
+        if isinstance(height, Number) and isinstance(width, Number):
+            return int(height), int(width)
         if hasattr(size, "to_dict"):
             size = size.to_dict()
         if isinstance(size, Mapping):
