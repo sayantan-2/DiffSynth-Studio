@@ -6,6 +6,8 @@ model-specific scheduler and decoder details; the optimization algorithm itself
 is shared by every supported image pipeline.
 """
 from dataclasses import dataclass
+from collections.abc import Mapping
+from numbers import Number
 from typing import Callable
 
 import torch
@@ -136,12 +138,31 @@ class DifferentiableAestheticReward(torch.nn.Module):
         super().__init__()
         self.model = aesthetic_model.eval().requires_grad_(False)
 
+    @staticmethod
+    def _spatial_size(size):
+        """Extract `(height, width)` from Transformers dict/SizeDict variants."""
+        if isinstance(size, Number):
+            value = int(size)
+            return value, value
+        if hasattr(size, "to_dict"):
+            size = size.to_dict()
+        if isinstance(size, Mapping):
+            height, width = size.get("height"), size.get("width")
+            if isinstance(height, Number) and isinstance(width, Number):
+                return int(height), int(width)
+            # Some processor revisions nest SizeDict objects under both keys.
+            for value in size.values():
+                try:
+                    return DifferentiableAestheticReward._spatial_size(value)
+                except (TypeError, ValueError):
+                    pass
+        raise TypeError(f"Cannot extract an image size from processor crop_size={size!r}")
+
     def forward(self, images):
         processor = self.model.processor
         if processor is None:
             raise RuntimeError("Aesthetic model has no image processor")
-        size = processor.crop_size
-        size = (size["height"], size["width"]) if isinstance(size, dict) else (size, size)
+        size = self._spatial_size(processor.crop_size)
         images = F.interpolate(images, size=size, mode="bicubic", align_corners=False, antialias=True)
         mean = torch.as_tensor(processor.image_mean, device=images.device, dtype=images.dtype).view(1, 3, 1, 1)
         std = torch.as_tensor(processor.image_std, device=images.device, dtype=images.dtype).view(1, 3, 1, 1)
