@@ -1,8 +1,9 @@
 """Direct Reward Fine-Tuning (DRaFT), isolated from existing training paths.
 
 Implements DRaFT, DRaFT-K, and DRaFT-LV from Clark et al., ICLR 2024
-(arXiv:2309.17400v2). The caller supplies an already prepared latent-diffusion
-pipeline and a frozen, differentiable reward function.
+(arXiv:2309.17400v2). A ``DRaFTPipelineAdapter`` supplies the small,
+model-specific scheduler and decoder details; the optimization algorithm itself
+is shared by every supported image pipeline.
 """
 from dataclasses import dataclass
 from typing import Callable
@@ -30,6 +31,33 @@ class DRaFTConfig:
             raise ValueError("low_variance_timestep must be non-negative")
 
 
+class DRaFTPipelineAdapter:
+    """Hooks needed to run the shared DRaFT loss on a DiffSynth image pipe.
+
+    The defaults target Stable Diffusion/DDIM. Other pipelines override only
+    the hooks whose scheduler or VAE differs; they do not duplicate DRaFT-K or
+    DRaFT-LV's sampling and reward-gradient logic.
+    """
+
+    def configure_scheduler(self, pipe, inputs_shared, config: DRaFTConfig):
+        pipe.scheduler.set_timesteps(config.num_inference_steps)
+
+    def before_sampling(self, pipe):
+        pass
+
+    def before_decode(self, pipe):
+        pass
+
+    def decode(self, pipe, latents):
+        image = pipe.vae.decode(latents / pipe.vae.scaling_factor)
+        return ((image + 1) / 2).clamp(0, 1)
+
+    def low_variance_point(self, pipe, config: DRaFTConfig):
+        """Return `(timestep, progress_id)` for one DRaFT-LV denoise pass."""
+        timestep = torch.tensor([config.low_variance_timestep], device=pipe.device, dtype=pipe.torch_dtype)
+        return timestep, len(pipe.scheduler.timesteps) - 1
+
+
 class DRaFTLoss(torch.nn.Module):
     """Minimizable negative reward loss for a DiffSynth latent-diffusion pipe.
 
@@ -37,16 +65,17 @@ class DRaFTLoss(torch.nn.Module):
     return a differentiable score per image. Its parameters should be frozen.
     """
 
-    def __init__(self, reward_fn: Callable[[torch.Tensor], torch.Tensor], config: DRaFTConfig = None):
+    def __init__(
+        self,
+        reward_fn: Callable[[torch.Tensor], torch.Tensor],
+        config: DRaFTConfig = None,
+        pipeline_adapter: DRaFTPipelineAdapter = None,
+    ):
         super().__init__()
         self.reward_fn = reward_fn
         self.config = config or DRaFTConfig()
         self.config.validate()
-
-    @staticmethod
-    def decode(pipe, latents):
-        image = pipe.vae.decode(latents / pipe.vae.scaling_factor)
-        return ((image + 1) / 2).clamp(0, 1)
+        self.pipeline_adapter = pipeline_adapter or DRaFTPipelineAdapter()
 
     def reward(self, images):
         value = self.reward_fn(images)
@@ -54,42 +83,43 @@ class DRaFTLoss(torch.nn.Module):
             raise TypeError("reward_fn must return a torch.Tensor")
         return value.reshape(-1).mean()
 
+    def _denoise(self, pipe, shared, inputs_posi, inputs_nega, models, latents, timestep, progress_id):
+        shared["latents"] = latents
+        prediction = pipe.cfg_guided_model_fn(
+            pipe.model_fn, self.config.cfg_scale, shared, inputs_posi, inputs_nega,
+            **models, timestep=timestep, progress_id=progress_id,
+        )
+        return pipe.step(
+            pipe.scheduler, latents, progress_id, prediction,
+            **{name: value for name, value in shared.items() if name != "latents"},
+        )
+
     def forward(self, pipe, inputs_shared, inputs_posi, inputs_nega):
         cfg = self.config
-        pipe.scheduler.set_timesteps(cfg.num_inference_steps)
-        models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
         shared = dict(inputs_shared)
+        adapter = self.pipeline_adapter
+        adapter.configure_scheduler(pipe, shared, cfg)
+        adapter.before_sampling(pipe)
+        models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
         latents = shared["latents"]
         detach_at = cfg.num_inference_steps - cfg.truncated_backprop_steps
 
         for progress_id, timestep in enumerate(pipe.scheduler.timesteps):
             if progress_id == detach_at:
-                # This stop-gradient is DRaFT-K. K == number of inference
-                # steps retains the full DRaFT graph.
+                # Stop-gradient is DRaFT-K. K == N retains full DRaFT.
                 latents = latents.detach()
             timestep = timestep.unsqueeze(0).to(dtype=pipe.torch_dtype, device=pipe.device)
-            shared["latents"] = latents
-            prediction = pipe.cfg_guided_model_fn(
-                pipe.model_fn, cfg.cfg_scale, shared, inputs_posi, inputs_nega,
-                **models, timestep=timestep, progress_id=progress_id,
-            )
-            latents = pipe.step(pipe.scheduler, latents, progress_id, prediction, **{name: value for name, value in shared.items() if name != "latents"})
+            latents = self._denoise(pipe, shared, inputs_posi, inputs_nega, models, latents, timestep, progress_id)
 
-        rewards = [self.reward(self.decode(pipe, latents))]
+        reward_latents = [latents]
         if cfg.low_variance_samples > 1:
-            # DRaFT-LV: forward diffuse the generated sample and denoise the
-            # extra variants, which reduces gradient-estimator variance without
-            # regenerating complete sampling trajectories.
-            timestep = torch.tensor([cfg.low_variance_timestep], device=pipe.device, dtype=pipe.torch_dtype)
+            timestep, progress_id = adapter.low_variance_point(pipe, cfg)
             for _ in range(cfg.low_variance_samples - 1):
                 noisy = pipe.scheduler.add_noise(latents, torch.randn_like(latents), timestep)
-                shared["latents"] = noisy
-                prediction = pipe.cfg_guided_model_fn(
-                    pipe.model_fn, cfg.cfg_scale, shared, inputs_posi, inputs_nega,
-                    **models, timestep=timestep, progress_id=len(pipe.scheduler.timesteps) - 1,
-                )
-                denoised = pipe.scheduler.step(prediction, timestep, noisy, to_final=True)
-                rewards.append(self.reward(self.decode(pipe, denoised)))
+                reward_latents.append(self._denoise(pipe, shared, inputs_posi, inputs_nega, models, noisy, timestep, progress_id))
+
+        adapter.before_decode(pipe)
+        rewards = [self.reward(adapter.decode(pipe, sample)) for sample in reward_latents]
         return -torch.stack(rewards).mean()
 
 
@@ -114,5 +144,3 @@ class DifferentiableAestheticReward(torch.nn.Module):
         features = self.model.visual_projection(features)
         features = F.normalize(features, dim=-1)
         return self.model.layers(features).squeeze(-1)
-
-
