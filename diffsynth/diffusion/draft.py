@@ -105,11 +105,17 @@ class DRaFTLoss(torch.nn.Module):
         detach_at = cfg.num_inference_steps - cfg.truncated_backprop_steps
 
         for progress_id, timestep in enumerate(pipe.scheduler.timesteps):
-            if progress_id == detach_at:
-                # Stop-gradient is DRaFT-K. K == N retains full DRaFT.
-                latents = latents.detach()
             timestep = timestep.unsqueeze(0).to(dtype=pipe.torch_dtype, device=pipe.device)
-            latents = self._denoise(pipe, shared, inputs_posi, inputs_nega, models, latents, timestep, progress_id)
+            if progress_id < detach_at:
+                # DRaFT-K must avoid *building* a graph for the prefix, not
+                # merely detach it later. Otherwise K=1 still reaches the
+                # memory peak of full unrolled backpropagation.
+                with torch.no_grad():
+                    latents = self._denoise(pipe, shared, inputs_posi, inputs_nega, models, latents, timestep, progress_id)
+            else:
+                if progress_id == detach_at:
+                    latents = latents.detach()
+                latents = self._denoise(pipe, shared, inputs_posi, inputs_nega, models, latents, timestep, progress_id)
 
         reward_latents = [latents]
         if cfg.low_variance_samples > 1:
