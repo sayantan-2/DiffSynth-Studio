@@ -247,12 +247,21 @@ class DifferentiableFaceIdentityReward(torch.nn.Module):
         from torchvision.ops import roi_align
 
         rois, indices = self._detect_rois(images)
-        zero_scores = images.mean(dim=(1, 2, 3)) * 0
+        # torchvision ROI Align has no CUDA BFloat16 kernel. Keep this frozen
+        # reward branch in Float32; casting remains differentiable to Krea's
+        # BFloat16 VAE output.
+        zero_scores = images.float().mean(dim=(1, 2, 3)) * 0
         if rois is None:
             # Detector misses should not terminate a long reward-training run.
             return zero_scores
         # ArcFace convention matches the BGR aligned reference crop above.
-        faces = roi_align(images[:, [2, 1, 0]], rois, output_size=(112, 112), spatial_scale=1.0, aligned=True)
+        faces = roi_align(
+            images[:, [2, 1, 0]].float(),
+            rois.float(),
+            output_size=(112, 112),
+            spatial_scale=1.0,
+            aligned=True,
+        )
         embeddings = self._features(faces * 2 - 1)
         reference = self.reference_embedding.to(device=embeddings.device, dtype=embeddings.dtype)
         scores = (embeddings * reference.unsqueeze(0)).sum(dim=-1).clamp(-1, 1)
