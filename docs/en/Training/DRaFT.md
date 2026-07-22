@@ -77,7 +77,17 @@ Text-conditioned rewards need the prompt passed to the adapter as well; the gene
 
 ## Face-identity reward (Krea-2 Raw)
 
-Use `--draft_reward face_identity` to maximize cosine similarity between a generated face and `--draft_face_reference_image`. This is a reference-face identity objective; it is not a prompt-only character-consistency model.
+Use `--draft_reward face_identity` to maximize cosine similarity between a generated face and a reference face. The recommended mode is an `image,prompt` dataset: omit `--draft_face_reference_image`, pass `--dataset_base_path`, and each row's `image` becomes that iteration's identity reference. The generated image—not the source image—is passed through Krea.
+
+Example CSV:
+
+```csv
+image,prompt
+portraits/vivie-001.png,"vivie, studio portrait, soft daylight"
+portraits/vivie-002.png,"vivie, outdoor portrait, golden hour"
+```
+
+For one consistent character, every source image should show the same identity and every prompt should include the same distinctive trigger token (for example `vivie`). A dataset containing multiple identities needs distinct, reliable identity tokens; otherwise its rewards conflict. `--draft_face_reference_image` remains available for static-reference experiments, but is not the preferred training mode.
 
 Antelopev2 runs on CPU to detect the largest face in the reference image and each generated image. Detection itself is non-differentiable, but its selected face box drives a differentiable ROI Align crop of the generated image. A frozen PyTorch ArcFace encoder from `facexlib` produces the reference and generated embeddings, so cosine similarity has a valid DRaFT gradient. Antelopev2's ONNX recognition model is deliberately not used for the reward because it has no PyTorch autograd path.
 
@@ -92,7 +102,7 @@ The Antelopev2 model pack is manually installed: put its `.onnx` files at `model
 Run:
 
 ```bash
-REFERENCE_FACE=/path/to/reference.png bash examples/krea2/model_training/lora/Krea-2-Raw-DRaFT-FaceIdentity.sh
+DATASET_BASE_PATH=/path/to/images DATASET_METADATA_PATH=/path/to/pairs.csv bash examples/krea2/model_training/lora/Krea-2-Raw-DRaFT-FaceIdentity.sh
 ```
 
 Start with `--draft_low_variance_samples 1`: face detection and ArcFace scoring add runtime to every reward evaluation.
@@ -111,7 +121,7 @@ bash examples/stable_diffusion/model_training/lora/stable-diffusion-v1-5-draft-a
 `PROMPTS_CSV=/path/to/prompts.csv bash ...` supplies your own prompt set. Model components and the aesthetic reward download on first use. Start with LoRA, gradient checkpointing, K=1, LV=1 or 2, then validate on held-out prompts with independent metrics and visual review: reward optimization can overfit reward-model artifacts or reduce diversity.
 ## Krea-2 Raw adapter
 
-Krea-2 Raw uses `Krea2DRaFTAdapter` in its prompt-only runner at `examples/krea2/model_training/train_draft.py`. It follows the same DRaFT-K/LV method and reward contract, but adapts the generic objective to Krea-2's flow-matching scheduler and Qwen Image VAE.
+Krea-2 Raw uses `Krea2DRaFTAdapter` in `examples/krea2/model_training/train_draft.py`, which supports prompt-only rewards and image/prompt face-identity pairs. It follows the same DRaFT-K/LV method and reward contract, but adapts the generic objective to Krea-2's flow-matching scheduler and Qwen Image VAE.
 
 - The default sampler configuration is 28 steps with CFG 3.5, matching Krea-2 Raw inference defaults.
 - Krea's `--draft_low_variance_timestep` is a sampler-trajectory index (default 12), not a DDIM training timestep; it is clamped to the valid index range.

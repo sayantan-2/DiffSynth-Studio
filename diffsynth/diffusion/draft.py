@@ -133,16 +133,16 @@ class DRaFTLoss(torch.nn.Module):
 
 
 class DifferentiableFaceIdentityReward(torch.nn.Module):
-    """Reference-face cosine reward with differentiable ArcFace features.
+    """ArcFace identity reward with static or per-row reference faces.
 
-    InsightFace Antelopev2 detects faces on detached CPU images. A frozen
-    PyTorch ArcFace encoder then scores differentiable ROI Align crops, so the
-    identity reward can propagate gradients into the diffusion sample.
+    Antelopev2 detects faces on detached CPU images. The selected generated-face
+    crop uses differentiable ROI Align before a frozen PyTorch ArcFace encoder
+    computes cosine similarity to the active reference embedding.
     """
 
     def __init__(
         self,
-        reference_image_path: str,
+        reference_image_path: str | None = None,
         insightface_root: str = "models/insightface",
         detection_size: int = 640,
         device="cuda",
@@ -159,40 +159,24 @@ class DifferentiableFaceIdentityReward(torch.nn.Module):
                 "Face identity DRaFT requires facexlib, insightface, onnxruntime, and opencv-python. "
                 "See docs/en/Training/DRaFT.md for setup."
             ) from error
-        from PIL import Image
 
         self._cv2 = cv2
         self._np = np
         self._face_align = face_align
         self._detector = self._load_antelope_detector(FaceAnalysis, insightface_root, detection_size)
         self.recognizer = init_recognition_model("arcface", device=device).eval().requires_grad_(False)
-
-        reference = Image.open(reference_image_path).convert("RGB")
-        reference_bgr = cv2.cvtColor(np.array(reference), cv2.COLOR_RGB2BGR)
-        face = self._largest_face(self._detector.get(reference_bgr))
-        if face is None:
-            raise ValueError(f"No face detected in face-identity reference image: {reference_image_path}")
-        aligned = face_align.norm_crop(reference_bgr, landmark=face["kps"], image_size=112)
-        reference_tensor = torch.from_numpy(aligned).permute(2, 0, 1).unsqueeze(0).float() / 127.5 - 1
-        with torch.no_grad():
-            embedding = self._features(reference_tensor.to(device=device))
-        self.register_buffer("reference_embedding", embedding.squeeze(0), persistent=True)
+        self.register_buffer("reference_embedding", torch.empty(0), persistent=True)
+        self._dataset_reference_image = None
+        if reference_image_path is not None:
+            self._set_static_reference(reference_image_path)
 
     @staticmethod
     def _load_antelope_detector(face_analysis_class, root, detection_size):
         """Load Antelopev2 and repair its occasionally nested zip layout."""
-        kwargs = {
-            "name": "antelopev2",
-            "root": root,
-            # Detection is non-differentiable and should not consume diffusion VRAM.
-            "providers": ["CPUExecutionProvider"],
-        }
+        kwargs = {"name": "antelopev2", "root": root, "providers": ["CPUExecutionProvider"]}
         try:
             detector = face_analysis_class(**kwargs)
         except AssertionError:
-            # InsightFace v0.7's archive may extract as
-            # models/antelopev2/antelopev2/*.onnx, whereas FaceAnalysis loads
-            # only models/antelopev2/*.onnx. Flatten that exact safe layout.
             model_dir = Path(root) / "models" / "antelopev2"
             nested_dir = model_dir / "antelopev2"
             nested_models = list(nested_dir.glob("*.onnx")) if nested_dir.is_dir() else []
@@ -208,14 +192,12 @@ class DifferentiableFaceIdentityReward(torch.nn.Module):
             detector = face_analysis_class(**kwargs)
         detector.prepare(ctx_id=-1, det_size=(detection_size, detection_size))
         return detector
+
     @staticmethod
     def _largest_face(faces):
         if not faces:
             return None
-        return max(
-            faces,
-            key=lambda face: float((face["bbox"][2] - face["bbox"][0]) * (face["bbox"][3] - face["bbox"][1])),
-        )
+        return max(faces, key=lambda face: float((face["bbox"][2] - face["bbox"][0]) * (face["bbox"][3] - face["bbox"][1])))
 
     def _features(self, faces):
         features = self.recognizer(faces)
@@ -225,9 +207,38 @@ class DifferentiableFaceIdentityReward(torch.nn.Module):
             features = features.unsqueeze(0)
         return F.normalize(features, dim=-1)
 
+    def _reference_tensor(self, image):
+        from PIL import Image
+
+        if isinstance(image, (str, Path)):
+            image = Image.open(image)
+        image_bgr = self._cv2.cvtColor(self._np.array(image.convert("RGB")), self._cv2.COLOR_RGB2BGR)
+        face = self._largest_face(self._detector.get(image_bgr))
+        if face is None:
+            raise ValueError("No face detected in face-identity reference image.")
+        aligned = self._face_align.norm_crop(image_bgr, landmark=face["kps"], image_size=112)
+        return torch.from_numpy(aligned).permute(2, 0, 1).unsqueeze(0).float() / 127.5 - 1
+
+    def _set_static_reference(self, image):
+        device = next(self.recognizer.parameters()).device
+        with torch.no_grad():
+            embedding = self._features(self._reference_tensor(image).to(device=device))
+        self.reference_embedding = embedding.squeeze(0).detach()
+
+    def set_reference_image(self, image):
+        """Select the PIL image for the next prompt/reference dataset row."""
+        self._dataset_reference_image = image
+
+    def _active_reference_embedding(self, device, dtype):
+        if self.reference_embedding.numel() != 0:
+            return self.reference_embedding.to(device=device, dtype=dtype)
+        if self._dataset_reference_image is None:
+            raise RuntimeError("Face identity reward needs --draft_face_reference_image or a dataset `image` column.")
+        with torch.no_grad():
+            embedding = self._features(self._reference_tensor(self._dataset_reference_image).to(device=device))
+        return embedding.squeeze(0).to(dtype=dtype)
+
     def _detect_rois(self, images):
-        # Face locations are treated as fixed crop coordinates. The subsequent
-        # ROI Align operation is differentiable with respect to image pixels.
         arrays = (images.detach().float().clamp(0, 1).cpu().permute(0, 2, 3, 1).numpy() * 255).round().astype("uint8")
         rois, indices = [], []
         for index, image in enumerate(arrays):
@@ -241,29 +252,18 @@ class DifferentiableFaceIdentityReward(torch.nn.Module):
             indices.append(index)
         if not rois:
             return None, None
-        return torch.tensor(rois, device=images.device, dtype=images.dtype), torch.tensor(indices, device=images.device, dtype=torch.long)
+        return torch.tensor(rois, device=images.device, dtype=torch.float32), torch.tensor(indices, device=images.device, dtype=torch.long)
 
     def forward(self, images):
         from torchvision.ops import roi_align
 
         rois, indices = self._detect_rois(images)
-        # torchvision ROI Align has no CUDA BFloat16 kernel. Keep this frozen
-        # reward branch in Float32; casting remains differentiable to Krea's
-        # BFloat16 VAE output.
         zero_scores = images.float().mean(dim=(1, 2, 3)) * 0
         if rois is None:
-            # Detector misses should not terminate a long reward-training run.
             return zero_scores
-        # ArcFace convention matches the BGR aligned reference crop above.
-        faces = roi_align(
-            images[:, [2, 1, 0]].float(),
-            rois.float(),
-            output_size=(112, 112),
-            spatial_scale=1.0,
-            aligned=True,
-        )
+        faces = roi_align(images[:, [2, 1, 0]].float(), rois, output_size=(112, 112), spatial_scale=1.0, aligned=True)
         embeddings = self._features(faces * 2 - 1)
-        reference = self.reference_embedding.to(device=embeddings.device, dtype=embeddings.dtype)
+        reference = self._active_reference_embedding(embeddings.device, embeddings.dtype)
         scores = (embeddings * reference.unsqueeze(0)).sum(dim=-1).clamp(-1, 1)
         return zero_scores.index_copy(0, indices, scores)
 

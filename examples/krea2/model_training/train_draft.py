@@ -1,4 +1,4 @@
-"""Train a Krea-2 Raw LoRA with DRaFT using prompt-only metadata."""
+"""Train a Krea-2 Raw LoRA with DRaFT from prompts or image/prompt identity pairs."""
 import argparse
 import json
 import os
@@ -7,6 +7,7 @@ import accelerate
 import torch
 
 from diffsynth.core import UnifiedDataset
+from diffsynth.core.data.operators import LoadImage, ToAbsolutePath
 from diffsynth.diffusion import DiffusionTrainingModule, ModelLogger, add_general_config, add_image_size_config, launch_training_task
 from diffsynth.diffusion.draft import DRaFTConfig, DRaFTLoss, DRaFTPipelineAdapter, DifferentiableAestheticReward, DifferentiableFaceIdentityReward
 from diffsynth.metrics.aesthetic import AestheticMetric
@@ -54,8 +55,9 @@ class Krea2DRaFTTrainingModule(DiffusionTrainingModule):
             metric = AestheticMetric.from_pretrained(torch_dtype=torch.float32, device=device)
             self.reward = DifferentiableAestheticReward(metric.model)
         else:
-            if args.draft_face_reference_image is None:
-                raise ValueError("--draft_face_reference_image is required with --draft_reward face_identity.")
+            self.dataset_face_references = args.draft_face_reference_image is None
+            if self.dataset_face_references and not args.dataset_base_path:
+                raise ValueError("--dataset_base_path is required for face_identity dataset references.")
             self.reward = DifferentiableFaceIdentityReward(
                 args.draft_face_reference_image,
                 insightface_root=args.draft_insightface_root,
@@ -63,11 +65,14 @@ class Krea2DRaFTTrainingModule(DiffusionTrainingModule):
                 device=device,
             )
         self.loss_fn = DRaFTLoss(self.reward, DRaFTConfig(args.draft_num_inference_steps, args.draft_truncated_backprop_steps, args.draft_low_variance_samples, args.draft_low_variance_timestep, args.draft_cfg_scale), Krea2DRaFTAdapter())
+        self.dataset_face_references = getattr(self, "dataset_face_references", False)
         self.height, self.width = args.height, args.width
         self.use_gradient_checkpointing = args.use_gradient_checkpointing
         self.use_gradient_checkpointing_offload = args.use_gradient_checkpointing_offload
 
     def get_pipeline_inputs(self, data):
+        if self.dataset_face_references:
+            self.reward.set_reference_image(data["image"])
         shared = {
             "input_image": None, "height": self.height, "width": self.width,
             "cfg_scale": self.loss_fn.config.cfg_scale, "rand_device": self.pipe.device,
@@ -100,7 +105,7 @@ def parser():
     p.add_argument("--draft_low_variance_timestep", type=int, default=12, help="Krea-2 sampler index used for DRaFT-LV resampling.")
     p.add_argument("--draft_cfg_scale", type=float, default=3.5)
     p.add_argument("--draft_reward", choices=["aesthetic", "face_identity"], default="aesthetic")
-    p.add_argument("--draft_face_reference_image", type=str, default=None, help="Reference face image for face_identity reward.")
+    p.add_argument("--draft_face_reference_image", type=str, default=None, help="Optional static reference; omit it to use each dataset row's image column.")
     p.add_argument("--draft_insightface_root", type=str, default="models/insightface", help="InsightFace root containing models/antelopev2/.")
     p.add_argument("--draft_face_detection_size", type=int, default=640, help="Antelopev2 face detector resolution.")
     return p
@@ -109,7 +114,19 @@ def parser():
 if __name__ == "__main__":
     args = parser().parse_args()
     accelerator = accelerate.Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps, kwargs_handlers=[accelerate.DistributedDataParallelKwargs(find_unused_parameters=args.find_unused_parameters)])
-    dataset = UnifiedDataset(base_path="", metadata_path=args.dataset_metadata_path, repeat=args.dataset_repeat, data_file_keys=tuple(), main_data_operator=lambda value: value)
+    use_dataset_face_references = args.draft_reward == "face_identity" and args.draft_face_reference_image is None
+    if use_dataset_face_references:
+        if not args.dataset_base_path:
+            raise ValueError("--dataset_base_path is required when face_identity uses dataset images.")
+        dataset = UnifiedDataset(
+            base_path=args.dataset_base_path,
+            metadata_path=args.dataset_metadata_path,
+            repeat=args.dataset_repeat,
+            data_file_keys=("image",),
+            main_data_operator=ToAbsolutePath(args.dataset_base_path) >> LoadImage(),
+        )
+    else:
+        dataset = UnifiedDataset(base_path="", metadata_path=args.dataset_metadata_path, repeat=args.dataset_repeat, data_file_keys=tuple(), main_data_operator=lambda value: value)
     model = Krea2DRaFTTrainingModule(args, "cpu" if args.enable_model_cpu_offload else accelerator.device)
     logger = ModelLogger(args.output_path, remove_prefix_in_ckpt=args.remove_prefix_in_ckpt, state_dict_converter=Krea2LoRAConverter.align_to_opensource_format if args.align_to_opensource_format else lambda value: value, enable_tensorboard_log=args.enable_tensorboard_log, enable_swanlab_log=args.enable_swanlab_log, swanlab_project=args.swanlab_project, enable_wandb_log=args.enable_wandb_log, wandb_project=args.wandb_project)
     launch_training_task(accelerator, dataset, model, logger, args=args)
