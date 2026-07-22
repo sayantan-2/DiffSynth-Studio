@@ -106,6 +106,8 @@ DATASET_BASE_PATH=/path/to/images DATASET_METADATA_PATH=/path/to/pairs.csv bash 
 ```
 
 Start with `--draft_low_variance_samples 1`: face detection and ArcFace scoring add runtime to every reward evaluation.
+
+For Krea-2, `--draft_low_variance_timestep 12` is the sampler-trajectory index at which that low-variance branch starts; it has an effect only when `--draft_low_variance_samples` is greater than `1`. It is explicit in the face launcher for reproducibility.
 ## Extending to another image model
 
 The objective is not tied to Stable Diffusion. Supply a `DRaFTPipelineAdapter` that configures the scheduler, selects the LV resampling point, and decodes latents. The target pipeline also needs model/CFG hooks (`model_fn`, `cfg_guided_model_fn`, pipeline `step`) plus initial latent and conditioning dictionaries.

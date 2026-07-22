@@ -22,6 +22,7 @@ accelerate launch examples/krea2/model_training/train_draft.py \
   --draft_num_inference_steps 30 \
   --draft_truncated_backprop_steps 1 \
   --draft_low_variance_samples 1 \
+  --draft_low_variance_timestep 12 \
   --draft_cfg_scale 3.5 \
   --draft_reward face_identity \
   --draft_insightface_root "models/insightface" \
