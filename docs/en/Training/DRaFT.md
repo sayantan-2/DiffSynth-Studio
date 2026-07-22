@@ -75,6 +75,27 @@ Useful choices include PickScore/HPS/CLIP preference scores, a detector confiden
 
 Text-conditioned rewards need the prompt passed to the adapter as well; the generic `DRaFTLoss` is image-reward-shaped by design, so make a small closure or adapter that captures the prompt batch.
 
+## Face-identity reward (Krea-2 Raw)
+
+Use `--draft_reward face_identity` to maximize cosine similarity between a generated face and `--draft_face_reference_image`. This is a reference-face identity objective; it is not a prompt-only character-consistency model.
+
+Antelopev2 runs on CPU to detect the largest face in the reference image and each generated image. Detection itself is non-differentiable, but its selected face box drives a differentiable ROI Align crop of the generated image. A frozen PyTorch ArcFace encoder from `facexlib` produces the reference and generated embeddings, so cosine similarity has a valid DRaFT gradient. Antelopev2's ONNX recognition model is deliberately not used for the reward because it has no PyTorch autograd path.
+
+Install the optional dependencies:
+
+```bash
+pip install facexlib insightface onnxruntime opencv-python
+```
+
+The Antelopev2 model pack is manually installed: put its `.onnx` files at `models/insightface/models/antelopev2/`, or point `--draft_insightface_root` at the directory containing `models/antelopev2/`. A generated image with no detected face receives a zero identity reward, rather than terminating training.
+
+Run:
+
+```bash
+REFERENCE_FACE=/path/to/reference.png bash examples/krea2/model_training/lora/Krea-2-Raw-DRaFT-FaceIdentity.sh
+```
+
+Start with `--draft_low_variance_samples 1`: face detection and ArcFace scoring add runtime to every reward evaluation.
 ## Extending to another image model
 
 The objective is not tied to Stable Diffusion. Supply a `DRaFTPipelineAdapter` that configures the scheduler, selects the LV resampling point, and decodes latents. The target pipeline also needs model/CFG hooks (`model_fn`, `cfg_guided_model_fn`, pipeline `step`) plus initial latent and conditioning dictionaries.

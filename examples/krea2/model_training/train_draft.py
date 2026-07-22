@@ -8,7 +8,7 @@ import torch
 
 from diffsynth.core import UnifiedDataset
 from diffsynth.diffusion import DiffusionTrainingModule, ModelLogger, add_general_config, add_image_size_config, launch_training_task
-from diffsynth.diffusion.draft import DRaFTConfig, DRaFTLoss, DRaFTPipelineAdapter, DifferentiableAestheticReward
+from diffsynth.diffusion.draft import DRaFTConfig, DRaFTLoss, DRaFTPipelineAdapter, DifferentiableAestheticReward, DifferentiableFaceIdentityReward
 from diffsynth.metrics.aesthetic import AestheticMetric
 from diffsynth.pipelines.krea2 import Krea2Pipeline, ModelConfig
 from diffsynth.utils.lora.krea2 import Krea2LoRAConverter
@@ -50,8 +50,18 @@ class Krea2DRaFTTrainingModule(DiffusionTrainingModule):
         tokenizer = self.parse_path_or_model_id(args.tokenizer_path, ModelConfig(model_id="Qwen/Qwen3-VL-4B-Instruct", origin_file_pattern=""))
         self.pipe = Krea2Pipeline.from_pretrained(torch_dtype=torch.bfloat16, device=device, model_configs=configs, tokenizer_config=tokenizer)
         self.switch_pipe_to_training_mode(self.pipe, args.trainable_models, args.lora_base_model, args.lora_target_modules, args.lora_rank, args.lora_checkpoint, args.preset_lora_path, args.preset_lora_model, task="draft")
-        metric = AestheticMetric.from_pretrained(torch_dtype=torch.float32, device=device)
-        self.reward = DifferentiableAestheticReward(metric.model)
+        if args.draft_reward == "aesthetic":
+            metric = AestheticMetric.from_pretrained(torch_dtype=torch.float32, device=device)
+            self.reward = DifferentiableAestheticReward(metric.model)
+        else:
+            if args.draft_face_reference_image is None:
+                raise ValueError("--draft_face_reference_image is required with --draft_reward face_identity.")
+            self.reward = DifferentiableFaceIdentityReward(
+                args.draft_face_reference_image,
+                insightface_root=args.draft_insightface_root,
+                detection_size=args.draft_face_detection_size,
+                device=device,
+            )
         self.loss_fn = DRaFTLoss(self.reward, DRaFTConfig(args.draft_num_inference_steps, args.draft_truncated_backprop_steps, args.draft_low_variance_samples, args.draft_low_variance_timestep, args.draft_cfg_scale), Krea2DRaFTAdapter())
         self.height, self.width = args.height, args.width
         self.use_gradient_checkpointing = args.use_gradient_checkpointing
@@ -89,6 +99,10 @@ def parser():
     p.add_argument("--draft_low_variance_samples", type=int, default=1)
     p.add_argument("--draft_low_variance_timestep", type=int, default=12, help="Krea-2 sampler index used for DRaFT-LV resampling.")
     p.add_argument("--draft_cfg_scale", type=float, default=3.5)
+    p.add_argument("--draft_reward", choices=["aesthetic", "face_identity"], default="aesthetic")
+    p.add_argument("--draft_face_reference_image", type=str, default=None, help="Reference face image for face_identity reward.")
+    p.add_argument("--draft_insightface_root", type=str, default="models/insightface", help="InsightFace root containing models/antelopev2/.")
+    p.add_argument("--draft_face_detection_size", type=int, default=640, help="Antelopev2 face detector resolution.")
     return p
 
 

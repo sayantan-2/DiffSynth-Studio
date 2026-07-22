@@ -131,6 +131,108 @@ class DRaFTLoss(torch.nn.Module):
         return -torch.stack(rewards).mean()
 
 
+class DifferentiableFaceIdentityReward(torch.nn.Module):
+    """Reference-face cosine reward with differentiable ArcFace features.
+
+    InsightFace Antelopev2 detects faces on detached CPU images. A frozen
+    PyTorch ArcFace encoder then scores differentiable ROI Align crops, so the
+    identity reward can propagate gradients into the diffusion sample.
+    """
+
+    def __init__(
+        self,
+        reference_image_path: str,
+        insightface_root: str = "models/insightface",
+        detection_size: int = 640,
+        device="cuda",
+    ):
+        super().__init__()
+        try:
+            import cv2
+            import numpy as np
+            from facexlib.recognition import init_recognition_model
+            from insightface.app import FaceAnalysis
+            from insightface.utils import face_align
+        except ImportError as error:
+            raise ImportError(
+                "Face identity DRaFT requires facexlib, insightface, onnxruntime, and opencv-python. "
+                "See docs/en/Training/DRaFT.md for setup."
+            ) from error
+        from PIL import Image
+
+        self._cv2 = cv2
+        self._np = np
+        self._face_align = face_align
+        self._detector = FaceAnalysis(
+            name="antelopev2",
+            root=insightface_root,
+            # Detection is non-differentiable and should not consume diffusion VRAM.
+            providers=["CPUExecutionProvider"],
+        )
+        self._detector.prepare(ctx_id=-1, det_size=(detection_size, detection_size))
+        self.recognizer = init_recognition_model("arcface", device=device).eval().requires_grad_(False)
+
+        reference = Image.open(reference_image_path).convert("RGB")
+        reference_bgr = cv2.cvtColor(np.array(reference), cv2.COLOR_RGB2BGR)
+        face = self._largest_face(self._detector.get(reference_bgr))
+        if face is None:
+            raise ValueError(f"No face detected in face-identity reference image: {reference_image_path}")
+        aligned = face_align.norm_crop(reference_bgr, landmark=face["kps"], image_size=112)
+        reference_tensor = torch.from_numpy(aligned).permute(2, 0, 1).unsqueeze(0).float() / 127.5 - 1
+        with torch.no_grad():
+            embedding = self._features(reference_tensor.to(device=device))
+        self.register_buffer("reference_embedding", embedding.squeeze(0), persistent=True)
+
+    @staticmethod
+    def _largest_face(faces):
+        if not faces:
+            return None
+        return max(
+            faces,
+            key=lambda face: float((face["bbox"][2] - face["bbox"][0]) * (face["bbox"][3] - face["bbox"][1])),
+        )
+
+    def _features(self, faces):
+        features = self.recognizer(faces)
+        if isinstance(features, (tuple, list)):
+            features = features[0]
+        if features.ndim == 1:
+            features = features.unsqueeze(0)
+        return F.normalize(features, dim=-1)
+
+    def _detect_rois(self, images):
+        # Face locations are treated as fixed crop coordinates. The subsequent
+        # ROI Align operation is differentiable with respect to image pixels.
+        arrays = (images.detach().float().clamp(0, 1).cpu().permute(0, 2, 3, 1).numpy() * 255).round().astype("uint8")
+        rois, indices = [], []
+        for index, image in enumerate(arrays):
+            face = self._largest_face(self._detector.get(self._cv2.cvtColor(image, self._cv2.COLOR_RGB2BGR)))
+            if face is None:
+                continue
+            x0, y0, x1, y1 = (float(value) for value in face["bbox"])
+            padding_x, padding_y = 0.15 * (x1 - x0), 0.15 * (y1 - y0)
+            height, width = image.shape[:2]
+            rois.append([index, max(0, x0 - padding_x), max(0, y0 - padding_y), min(width, x1 + padding_x), min(height, y1 + padding_y)])
+            indices.append(index)
+        if not rois:
+            return None, None
+        return torch.tensor(rois, device=images.device, dtype=images.dtype), torch.tensor(indices, device=images.device, dtype=torch.long)
+
+    def forward(self, images):
+        from torchvision.ops import roi_align
+
+        rois, indices = self._detect_rois(images)
+        zero_scores = images.mean(dim=(1, 2, 3)) * 0
+        if rois is None:
+            # Detector misses should not terminate a long reward-training run.
+            return zero_scores
+        # ArcFace convention matches the BGR aligned reference crop above.
+        faces = roi_align(images[:, [2, 1, 0]], rois, output_size=(112, 112), spatial_scale=1.0, aligned=True)
+        embeddings = self._features(faces * 2 - 1)
+        reference = self.reference_embedding.to(device=embeddings.device, dtype=embeddings.dtype)
+        scores = (embeddings * reference.unsqueeze(0)).sum(dim=-1).clamp(-1, 1)
+        return zero_scores.index_copy(0, indices, scores)
+
 class DifferentiableAestheticReward(torch.nn.Module):
     """Autograd-preserving adapter for DiffSynth's frozen AestheticMetric."""
 
