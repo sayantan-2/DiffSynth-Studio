@@ -87,7 +87,7 @@ Install the optional dependencies:
 pip install facexlib insightface onnxruntime opencv-python
 ```
 
-The Antelopev2 model pack is manually installed: put its `.onnx` files at `models/insightface/models/antelopev2/`, or point `--draft_insightface_root` at the directory containing `models/antelopev2/`. A generated image with no detected face receives a zero identity reward, rather than terminating training.
+The Antelopev2 model pack is manually installed: put its `.onnx` files at `models/insightface/models/antelopev2/`, or point `--draft_insightface_root` at the directory containing `models/antelopev2/`. The adapter also repairs the extra nested `antelopev2/antelopev2/*.onnx` layout created by some InsightFace archive downloads. A generated image with no detected face receives a zero identity reward, rather than terminating training.
 
 Run:
 

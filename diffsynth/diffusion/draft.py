@@ -8,6 +8,7 @@ is shared by every supported image pipeline.
 from dataclasses import dataclass
 from collections.abc import Mapping
 from numbers import Number
+from pathlib import Path
 from typing import Callable
 
 import torch
@@ -163,13 +164,7 @@ class DifferentiableFaceIdentityReward(torch.nn.Module):
         self._cv2 = cv2
         self._np = np
         self._face_align = face_align
-        self._detector = FaceAnalysis(
-            name="antelopev2",
-            root=insightface_root,
-            # Detection is non-differentiable and should not consume diffusion VRAM.
-            providers=["CPUExecutionProvider"],
-        )
-        self._detector.prepare(ctx_id=-1, det_size=(detection_size, detection_size))
+        self._detector = self._load_antelope_detector(FaceAnalysis, insightface_root, detection_size)
         self.recognizer = init_recognition_model("arcface", device=device).eval().requires_grad_(False)
 
         reference = Image.open(reference_image_path).convert("RGB")
@@ -183,6 +178,36 @@ class DifferentiableFaceIdentityReward(torch.nn.Module):
             embedding = self._features(reference_tensor.to(device=device))
         self.register_buffer("reference_embedding", embedding.squeeze(0), persistent=True)
 
+    @staticmethod
+    def _load_antelope_detector(face_analysis_class, root, detection_size):
+        """Load Antelopev2 and repair its occasionally nested zip layout."""
+        kwargs = {
+            "name": "antelopev2",
+            "root": root,
+            # Detection is non-differentiable and should not consume diffusion VRAM.
+            "providers": ["CPUExecutionProvider"],
+        }
+        try:
+            detector = face_analysis_class(**kwargs)
+        except AssertionError:
+            # InsightFace v0.7's archive may extract as
+            # models/antelopev2/antelopev2/*.onnx, whereas FaceAnalysis loads
+            # only models/antelopev2/*.onnx. Flatten that exact safe layout.
+            model_dir = Path(root) / "models" / "antelopev2"
+            nested_dir = model_dir / "antelopev2"
+            nested_models = list(nested_dir.glob("*.onnx")) if nested_dir.is_dir() else []
+            if not nested_models:
+                raise
+            for source in nested_models:
+                destination = model_dir / source.name
+                if destination.exists():
+                    raise RuntimeError(f"Cannot normalize Antelopev2 layout: destination already exists: {destination}")
+                source.replace(destination)
+            if not any(nested_dir.iterdir()):
+                nested_dir.rmdir()
+            detector = face_analysis_class(**kwargs)
+        detector.prepare(ctx_id=-1, det_size=(detection_size, detection_size))
+        return detector
     @staticmethod
     def _largest_face(faces):
         if not faces:
